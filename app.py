@@ -2,6 +2,10 @@ import streamlit as st
 import pymupdf
 import os
 import json
+import html
+import hmac
+import hashlib
+import secrets
 import re
 import textwrap
 import zipfile
@@ -11,10 +15,130 @@ from groq import Groq
 from docx import Document
 
 # --------------------------------------------------
-# CONFIGURATION
+# PAGE CONFIG
 # --------------------------------------------------
 
+st.set_page_config(
+    page_title="AI Resume Analyzer",
+    page_icon="📄",
+    layout="wide"
+)
+
 load_dotenv()
+
+USER_STORE = os.path.join(os.path.dirname(__file__), "users.json")
+
+
+def load_users():
+    try:
+        with open(USER_STORE, "r", encoding="utf-8") as user_file:
+            users = json.load(user_file)
+            return users if isinstance(users, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_users(users):
+    with open(USER_STORE, "w", encoding="utf-8") as user_file:
+        json.dump(users, user_file, indent=2)
+
+
+def hash_password(password, salt=None):
+    salt = salt or secrets.token_hex(16)
+    password_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        120_000,
+    ).hex()
+    return salt, password_hash
+
+
+def password_matches(password, salt, expected_hash):
+    _, password_hash = hash_password(password, salt)
+    return hmac.compare_digest(password_hash, expected_hash)
+
+
+def valid_email(email):
+    return re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) is not None
+
+
+def show_output_item(value, style):
+    safe_value = html.escape(str(value))
+    st.markdown(
+        f'<div class="output-item output-{style}">{safe_value}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+users = load_users()
+configured_email = os.getenv("LOGIN_EMAIL", "").strip().lower()
+configured_password = os.getenv("LOGIN_PASSWORD", "")
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.title("AI Resume Analyzer")
+
+    login_tab, register_tab = st.tabs(["Sign in", "Create account"])
+
+    with login_tab:
+        with st.form("login_form"):
+            email = st.text_input("Email address", placeholder="you@example.com")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign in", type="primary")
+
+        if submitted:
+            normalized_email = email.strip().lower()
+            registered_user = users.get(normalized_email)
+            registered_login = registered_user and password_matches(
+                password,
+                registered_user["salt"],
+                registered_user["password_hash"],
+            )
+            configured_login = (
+                configured_email
+                and configured_password
+                and hmac.compare_digest(normalized_email, configured_email)
+                and hmac.compare_digest(password, configured_password)
+            )
+
+            if registered_login or configured_login:
+                st.session_state["authenticated"] = True
+                st.session_state["user_email"] = normalized_email
+                st.rerun()
+            else:
+                st.error("Invalid email or password.")
+
+    with register_tab:
+        with st.form("register_form"):
+            new_email = st.text_input("Email address", key="register_email")
+            new_password = st.text_input("Password", type="password", key="register_password")
+            confirm_password = st.text_input("Confirm password", type="password")
+            register_submitted = st.form_submit_button("Create account", type="primary")
+
+        if register_submitted:
+            normalized_email = new_email.strip().lower()
+
+            if not valid_email(normalized_email):
+                st.error("Enter a valid email address.")
+            elif len(new_password) < 8:
+                st.error("Password must contain at least 8 characters.")
+            elif new_password != confirm_password:
+                st.error("Passwords do not match.")
+            elif normalized_email in users or normalized_email == configured_email:
+                st.error("An account with this email already exists.")
+            else:
+                salt, password_hash = hash_password(new_password)
+                users[normalized_email] = {
+                    "salt": salt,
+                    "password_hash": password_hash,
+                }
+                save_users(users)
+                st.success("Account created. Open the Sign in tab to continue.")
+
+    st.stop()
 
 API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -27,70 +151,341 @@ client = Groq(api_key=API_KEY)
 MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # --------------------------------------------------
-# PAGE CONFIG
-# --------------------------------------------------
-
-st.set_page_config(
-    page_title="AI Resume Analyzer",
-    page_icon="📄",
-    layout="wide"
-)
-
-# --------------------------------------------------
 # CUSTOM CSS
 # --------------------------------------------------
 
 st.markdown("""
 <style>
+:root {
+    --ink: #102a43;
+    --ink-soft: #486581;
+    --ink-muted: #6b8294;
+    --surface: #ffffff;
+    --surface-soft: #f4faf9;
+    --line: #c8dfdc;
+    --teal: #0f766e;
+    --teal-light: #ccfbf1;
+    --coral: #e76f51;
+    --coral-light: #fff1eb;
+    --gold: #d99a2b;
+}
+
+[data-testid="stAppViewContainer"] {
+    background-color: #fbfdfc;
+    background-image:
+        radial-gradient(circle at 90% 0%, rgba(231, 111, 81, 0.12), transparent 25rem),
+        linear-gradient(135deg, #eaf8f5 0%, #fbfdfc 52%, #fff3ec 100%);
+    background-size: 100% 100%;
+}
+
+[data-testid="stAppViewContainer"] > .main {
+    background: radial-gradient(circle at 88% 6%, rgba(231, 111, 81, 0.10), transparent 26rem);
+}
+
+[data-testid="stMainBlockContainer"] {
+    padding-top: 2.5rem;
+    padding-bottom: 4rem;
+    max-width: 1180px;
+}
+
+[data-testid="stHeader"] {
+    background: rgba(255, 255, 255, 0.9);
+}
+
+[data-testid="stSidebar"] {
+    background: #102a43;
+}
+
+[data-testid="stSidebar"] * {
+    color: #f1fbf8 !important;
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .stMarkdown {
+    color: #f1fbf8 !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stAlert"] {
+    background: #1d4f78;
+    border: 1px solid #36769d;
+}
+
+/* Lines ~210–230 — UNIQUE LOGOUT BUTTON */
+
+[data-testid="stSidebar"] button[kind="secondary"] {
+    background: linear-gradient(135deg, #7c3aed, #4f46e5) !important;
+    color: #ffffff !important;
+    border: 1px solid #8b5cf6 !important;
+    border-radius: 12px !important;
+    font-weight: 700 !important;
+    padding: 0.55rem 1.2rem !important;
+    box-shadow: 0 4px 14px rgba(124, 58, 237, 0.35) !important;
+    transition: all 0.25s ease-in-out !important;
+}
+
+[data-testid="stSidebar"] button[kind="secondary"]:hover {
+    background: linear-gradient(135deg, #9333ea, #6366f1) !important;
+    color: #ffffff !important;
+    border-color: #a78bfa !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 7px 20px rgba(139, 92, 246, 0.5) !important;
+}
 
 .main-title {
-    color: #17324d;
-    font-size: 2.8rem;
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 3rem;
     font-weight: 800;
-    letter-spacing: -0.02em;
     margin-bottom: 0.25rem;
 }
 
 .subtitle {
-    color: #607286;
+    color: var(--ink-soft);
     font-size: 1.05rem;
     margin-bottom: 2rem;
 }
 
 .section {
-    color: #17324d;
+    color: var(--ink);
     font-size: 1.35rem;
     font-weight: 750;
     margin-top: 1.5rem;
     padding: 0.65rem 0 0.45rem 0.85rem;
-    border-left: 5px solid #e07a5f;
-    background: linear-gradient(90deg, #fff3ed 0%, rgba(255, 243, 237, 0) 75%);
+    border-left: 5px solid var(--coral);
+    background: linear-gradient(90deg, var(--coral-light) 0%, rgba(255, 241, 235, 0) 78%);
+}
+
+.section:first-letter {
+    color: var(--coral);
 }
 
 .result-intro {
-    background: #17324d;
+    background: linear-gradient(110deg, #12304a, #117c83);
     border-radius: 12px;
-    color: BLUE;
+    color: #ffffff;
     padding: 1.15rem 1.35rem;
     margin: 1rem 0 1.4rem;
 }
 
-.result-intro h3 {
-    color: white;
+.result-intro h3,
+[data-testid="stAppViewContainer"] .stMarkdown .result-intro h3 {
+    color: #ffffff !important;
     margin: 0;
 }
 
-.result-intro p {
-    color: #d9e7ef;
+.result-intro p,
+[data-testid="stAppViewContainer"] .stMarkdown .result-intro p {
+    color: #e8fbf8 !important;
     margin: 0.35rem 0 0;
 }
 
 .report-label {
-    color: #607286;
+    color: var(--ink-soft);
     font-size: 0.75rem;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+}
+
+[data-testid="stAppViewContainer"] .stMarkdown p,
+[data-testid="stAppViewContainer"] .stMarkdown li,
+[data-testid="stAppViewContainer"] .stMarkdown strong,
+[data-testid="stAppViewContainer"] h1,
+[data-testid="stAppViewContainer"] h2,
+[data-testid="stAppViewContainer"] h3,
+[data-testid="stAppViewContainer"] h4 {
+    color: var(--ink);
+}
+
+[data-testid="stMetricLabel"] {
+    color: var(--ink-soft) !important;
+    font-weight: 700;
+}
+
+[data-testid="stMetricValue"] {
+    color: var(--teal) !important;
+    font-weight: 800;
+}
+
+[data-testid="stMetric"] {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-top: 4px solid var(--teal);
+    border-radius: 12px;
+    box-shadow: 0 8px 20px rgba(16, 42, 67, 0.06);
+    padding: 1rem 1.1rem;
+}
+
+[data-testid="stMetricDelta"] {
+    color: var(--coral) !important;
+}
+
+[data-testid="stAlert"] p {
+    color: inherit !important;
+}
+
+[data-testid="stAlert"] {
+    border-radius: 10px;
+}
+
+.output-item {
+    border-radius: 9px;
+    margin: 0.4rem 0;
+    padding: 0.65rem 0.85rem;
+    font-weight: 600;
+}
+
+.output-positive {
+    background: #e4f7f2;
+    border-left: 4px solid var(--teal);
+    color: #075e59;
+}
+
+.output-negative {
+    background: #fff0ed;
+    border-left: 4px solid var(--coral);
+    color: #a63d2d;
+}
+
+.output-warning {
+    background: #fff7df;
+    border-left: 4px solid var(--gold);
+    color: #795510;
+}
+
+.output-info {
+    background: #eaf3fb;
+    border-left: 4px solid #3182bd;
+    color: #205a83;
+}
+
+[data-testid="stCodeBlock"] code,
+[data-testid="stJson"] {
+    color: var(--ink) !important;
+}
+
+div[data-testid="stTextArea"] textarea {
+    color: var(--ink) !important;
+    caret-color: var(--coral);
+}
+
+div[data-testid="stFileUploader"] section {
+    background: #ffffff;
+    border: 1px solid #b7d8d2;
+    border-radius: 12px;
+}
+
+div[data-testid="stFileUploader"] section * {
+    color: var(--ink);
+}
+
+div[data-testid="stFileUploader"] section small,
+div[data-testid="stFileUploader"] section [data-testid="stFileUploaderDropzoneInstructions"] div {
+    color: var(--ink-soft) !important;
+}
+
+div[data-testid="stFileUploader"] [data-testid="stFileUploaderFileName"] {
+    color: var(--ink) !important;
+    font-weight: 650;
+}
+
+div[data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] {
+    background: #eaf8f5 !important;
+    border: 1px solid #b7d8d2 !important;
+    border-radius: 10px !important;
+}
+
+div[data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] button {
+    background: #ffffff !important;
+    color: var(--ink) !important;
+    border: 1px solid var(--line) !important;
+}
+
+div[data-testid="stFileUploader"] [data-testid="stFileUploaderFile"] small {
+    color: var(--ink-soft) !important;
+}
+
+div[data-testid="stFileUploader"] label,
+div[data-testid="stTextArea"] label,
+div[data-testid="stTextInput"] label {
+    color: var(--ink) !important;
+    font-weight: 650;
+}
+
+div[data-testid="stTextArea"] textarea::placeholder,
+div[data-testid="stTextInput"] input::placeholder {
+    color: #78909c;
+    opacity: 1;
+}
+
+div[data-testid="stTextArea"] textarea,
+div[data-baseweb="input"] input {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    border-radius: 10px;
+}
+
+div[data-baseweb="input"] input:focus,
+div[data-testid="stTextArea"] textarea:focus {
+    border-color: var(--teal);
+    box-shadow: 0 0 0 2px var(--teal-light);
+}
+
+button[kind="primary"] {
+    background: var(--coral) !important;
+    border-color: var(--coral) !important;
+}
+
+button[kind="primary"]:hover {
+    background: #c9573d !important;
+    border-color: #c9573d !important;
+}
+
+button[kind="secondary"] {
+    color: var(--ink) !important;
+    border: 1px solid var(--line) !important;
+    background: var(--surface) !important;
+}
+
+button[kind="secondary"]:hover {
+    color: var(--teal) !important;
+    border-color: var(--teal) !important;
+    background: var(--teal-light) !important;
+}
+
+[data-baseweb="tab-list"] {
+    gap: 0.35rem;
+    border-bottom: 1px solid var(--line);
+}
+
+[data-baseweb="tab"] {
+    color: var(--ink-soft);
+    font-weight: 700;
+}
+
+[aria-selected="true"][data-baseweb="tab"] {
+    color: var(--teal) !important;
+}
+
+[data-baseweb="tab-highlight"] {
+    background: var(--coral) !important;
+}
+
+div[data-testid="stDownloadButton"] button {
+    color: var(--ink);
+    border-color: var(--line);
+    background: var(--surface);
+}
+
+div[data-testid="stDownloadButton"] button:hover {
+    color: var(--teal);
+    border-color: var(--teal);
+    background: var(--teal-light);
 }
 
 </style>
@@ -397,7 +792,13 @@ For improved bullet points, improve the wording without inventing achievements.
         return None
 
     except Exception as e:
-        st.error(f"AI analysis failed: {e}")
+        if getattr(e, "status_code", None) == 401:
+            st.error(
+                "Groq rejected the API key. Create a new Groq key, update GROQ_API_KEY in .env, "
+                "and restart Streamlit."
+            )
+        else:
+            st.error(f"AI analysis failed: {e}")
         return None
 
 
@@ -408,6 +809,11 @@ For improved bullet points, improve the wording without inventing achievements.
 with st.sidebar:
 
     st.header("⚙️ Settings")
+
+    if st.button("Log out"):
+        st.session_state["authenticated"] = False
+        st.session_state.pop("analysis", None)
+        st.rerun()
 
     st.write("### AI Model")
 
@@ -597,7 +1003,7 @@ if "analysis" in st.session_state:
         )
 
         for skill in matching:
-            st.success(skill)
+            show_output_item(skill, "positive")
 
     with col2:
 
@@ -609,7 +1015,7 @@ if "analysis" in st.session_state:
         )
 
         for skill in missing:
-            st.error(skill)
+            show_output_item(skill, "negative")
 
     # ------------------------------------------------
     # EDUCATION
@@ -673,7 +1079,7 @@ if "analysis" in st.session_state:
             "strengths",
             []
         ):
-            st.success(item)
+            show_output_item(item, "positive")
 
     with col2:
 
@@ -683,7 +1089,7 @@ if "analysis" in st.session_state:
             "weaknesses",
             []
         ):
-            st.warning(item)
+            show_output_item(item, "negative")
 
     # ------------------------------------------------
     # ATS ISSUES
@@ -702,7 +1108,7 @@ if "analysis" in st.session_state:
     if ats_issues:
 
         for issue in ats_issues:
-            st.warning(issue)
+            show_output_item(issue, "warning")
 
     else:
 
@@ -742,7 +1148,7 @@ if "analysis" in st.session_state:
         []
     ):
 
-        st.info(skill)
+        show_output_item(skill, "info")
 
     # ------------------------------------------------
     # RESUME IMPROVEMENTS
