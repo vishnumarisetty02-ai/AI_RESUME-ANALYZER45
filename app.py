@@ -141,6 +141,8 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 API_KEY = os.getenv("GROQ_API_KEY")
+if not API_KEY:
+    API_KEY = st.secrets.get("GROQ_API_KEY")
 
 if not API_KEY:
     st.error("GROQ_API_KEY is missing. Add it to your .env file.")
